@@ -432,6 +432,13 @@ static int __init queue_chardev_init(void){
 	DEFINE_KFIFO(data_queue, data_queue_type, 128);
 	printk(KERN_INFO "QUEUECHARDEV: KFIFO has been allocated.\n");
 
+	printk(KERN_INFO "QUEUECHARDEV: Ioctl Commands:\n");
+	printk(KERN_INFO "QUEUECHARDEV: QUEUE_IOCTL_RESET\t%u\n", QUEUE_IOCTL_RESET);
+	printk(KERN_INFO "QUEUECHARDEV: QUEUE_IOCTL_FULL\t%lu\n", QUEUE_IOCTL_FULL);
+	printk(KERN_INFO "QUEUECHARDEV: QUEUE_IOCTL_EMPTY\t%lu\n", QUEUE_IOCTL_EMPTY);
+	printk(KERN_INFO "QUEUECHARDEV: QUEUE_IOCTL_SIZE\t%lu\n", QUEUE_IOCTL_SIZE);
+	printk(KERN_INFO "QUEUECHARDEV: QUEUE_IOCTL_AVAIL\t%lu\n", QUEUE_IOCTL_AVAIL);
+
 	spin_lock_init(&queue_file_spinlock);
 	init_waitqueue_head(&our_queue);
 	//The init_module should return a value to the rest of kernel that asure
