@@ -146,6 +146,9 @@ long queue_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
 	//After we asure that this is a proper ioctl signal we have to decode and run it
 	switch(cmd){
 		case QUEUE_IOCTL_RESET:
+			//This command only works for system administrators
+			if(!capable(CAP_SYS_ADMIN))
+				return -EPERM;
 			//Here just flush all datas and reset the pointer so you could use an empty queue
 			printk(KERN_INFO "QUEUE_IOCTL_RESET\n");
 			kfifo_reset(&data_queue);
