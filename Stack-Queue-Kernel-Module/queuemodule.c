@@ -22,7 +22,6 @@
 #include <linux/sched.h>
 //For ioctl commands and macros
 #include <linux/ioctl.h>
-#include <asm/ioctl.h>
 //For evaluating capabilities
 #include <linux/capability.h>
 //For using spinlocks
@@ -91,8 +90,27 @@ static wait_queue_head_t our_queue;
 static struct kfifo data_queue;
 typedef struct {char buf[MAX_BUF_LEN];} data_queue_type;
 
+
 //This function calls on demand of read request from seq_files
 static int proc_show(struct seq_file *m, void *v){
+	static int occupied_space, i;
+	static char peek_queue_buffer[MAX_BUF_LEN];
+
+	spin_lock(&queue_file_spinlock);
+
+	//Here we have to obtain how many items left in the queue
+	//So we calculate the difference between actual queue size (in bytes) and available space (in bytes too)
+	//Then we divide the result by our data quantum (in bytes), the result means the number of items
+	occupied_space = (kfifo_size(&data_queue) - kfifo_avail(&data_queue))/ sizeof(data_queue_type);
+	printk(KERN_INFO "QUEUECHARDEV: There are %d itmes left in the queue\n", occupied_space);
+
+	//Then for each item, we pop it, print the result and insert in at the end of the queue ;)
+	for(i=0; i<occupied_space; i++){
+		kfifo_out(&data_queue, peek_queue_buffer, sizeof(data_queue_type));
+		seq_printf(m, "%d: %s\n", i, peek_queue_buffer);
+		kfifo_in(&data_queue,  peek_queue_buffer, sizeof(data_queue_type));
+	}
+	spin_unlock(&queue_file_spinlock);
 
 	return 0;
 }
@@ -102,6 +120,8 @@ static int proc_open(struct inode *inode, struct file *file){
 	printk(KERN_INFO "QUEUECHARDEV: ProcFS Open Function, Process \"%s:%i\"\n", current->comm, current->pid);
 	return single_open(file, proc_show, NULL);
 }
+
+
 
 //When device recive ioctl commands this function will perform the job depending on what kind of command it recieved
 long queue_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
@@ -123,33 +143,41 @@ long queue_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
 	if(!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 
+	//After we asure that this is a proper ioctl signal we have to decode and run it
 	switch(cmd){
 		case QUEUE_IOCTL_RESET:
+			//Here just flush all datas and reset the pointer so you could use an empty queue
 			printk(KERN_INFO "QUEUE_IOCTL_RESET\n");
 			kfifo_reset(&data_queue);
 			break;
 
 		case QUEUE_IOCTL_FULL:
+			//Here we check whether the queue is full or not
 			printk(KERN_INFO "QUEUE_IOCTL_FULL\n");
 			retval = kfifo_is_full(&data_queue);
 			break;
 
 		case QUEUE_IOCTL_EMPTY:
+			//Just like the previous condition but here we check whether it is empty or not
 			printk(KERN_INFO "QUEUE_IOCTL_EMPTY\n");
 			retval = kfifo_is_empty(&data_queue);
 			break;
 
 		case QUEUE_IOCTL_SIZE:
+			//This ioctl signal will return the size of the queue in how many data quantum it could get
 			printk(KERN_INFO "QUEUE_IOCTL_SIZE\n");
-			retval = kfifo_size(&data_queue);
+			retval = kfifo_size(&data_queue)/sizeof(data_queue_type);
 			break;
 
 		case QUEUE_IOCTL_AVAIL:
+			//This is how we could obtain how many empty room left in the queue for new datas
 			printk(KERN_INFO "QUEUE_IOCTL_AVAIL\n");
-			retval = kfifo_avail(&data_queue);
+			retval = kfifo_avail(&data_queue)/sizeof(data_queue_type);
 			break;
 
 		default:
+			//I dont know how logically this situation might be possible, but just in case
+			//This means a proper ioctl command recieved badly or anything :)
 			return -ENOTTY;
 	}
 
@@ -169,9 +197,11 @@ int queue_open(struct inode *inode, struct file *file){
 	spin_lock(&queue_file_spinlock);
 	if(queue_open_flag == 1 && !atomic_dec_and_test(&queue_open_atomic)){
 		spin_unlock(&queue_file_spinlock);
+		//If user process can not wait for respose and device was opend by another process, just reject it
 		if(file->f_flags & O_NONBLOCK)
 			return -EBUSY;
 
+		//If device previously opend, the the user process have to wait until the condition goes wrong
 		if(wait_event_interruptible(our_queue, (queue_open_flag == 1))){
 			printk(KERN_ALERT "QUEUECHARDEV: Queue open function put process \"%s:%i\" in Block mode\n", current->comm, current->pid);
 			return -ERESTARTSYS;
@@ -204,7 +234,8 @@ static ssize_t queue_read(struct file *filp, char *buffer, size_t length, loff_t
 		ret = 0;
 	}
 	else{
-		/* fill the buffer, return the buffer size */
+		spin_lock(&queue_file_spinlock);
+		//Pop from the queue and fill the buffer, return the buffer size
 		if(!kfifo_is_empty(&data_queue))
 			kfifo_out(&data_queue, queue_buffer, sizeof(data_queue_type));
 		else{
@@ -214,6 +245,7 @@ static ssize_t queue_read(struct file *filp, char *buffer, size_t length, loff_t
 
 		if(copy_to_user(buffer, queue_buffer, sizeof(queue_buffer)))
 			return -EFAULT;
+		spin_unlock(&queue_file_spinlock);
 
 		printk(KERN_INFO "QUEUECHARDEV: %lu bytes has read from DEV entry\n", queue_buffer_size);
 		ret = queue_buffer_size;
@@ -233,11 +265,13 @@ static ssize_t queue_write(struct file *file, const char *buffer, size_t length,
 		queue_buffer_size = length;
 
 	//write data to the buffer
+	spin_lock(&queue_file_spinlock);
 	if(copy_from_user(queue_buffer, buffer, queue_buffer_size))
 		return -EFAULT;
 
 	if(!kfifo_is_full(&data_queue))
 		kfifo_in(&data_queue, queue_buffer, sizeof(data_queue_type));
+	spin_unlock(&queue_file_spinlock);
 
 	//The function returns wrote charachters count
 	printk(KERN_INFO "QUEUECHARDEV: %lu bytes has wrote to DEV entry\n", queue_buffer_size);
@@ -265,9 +299,7 @@ int queue_release(struct inode *inode, struct file *file){
 //Struct file_operations is the key to the functionality of the module
 //functions that defined here are going to add to the kernel functionallity
 //in order to respond to userspace access demand to the correspond /dev entry
-
-
-static struct file_operations fops = {
+static struct file_operations dev_fops = {
 	.owner = THIS_MODULE,
 	.read = queue_read,
 	.write = queue_write,
@@ -358,7 +390,7 @@ static int __init queue_chardev_init(void){
 	printk(KERN_INFO "QUEUECHARDEV: Device file has been created in /dev/queue\n");
 
 	//Fourth, We have to initiate our device to its file_operations struct
-	cdev_init(&queue_cdev, &fops);
+	cdev_init(&queue_cdev, &dev_fops);
 	if(cdev_add(&queue_cdev, queue_device, queue_minor_count) < 0){
 		printk(KERN_ALERT "QUEUECHARDEV: Device could not initialize to the system.\n");
 		device_destroy(device_class, queue_device);
@@ -372,7 +404,7 @@ static int __init queue_chardev_init(void){
 	}
 
 
-	our_proc_file = proc_create(DEVICE_NAME, 0644 , NULL, &fops);
+	our_proc_file = proc_create(DEVICE_NAME, 0644 , NULL, &proc_fops);
 	//Put an error message in kernel log if cannot create proc entry
 	if(!our_proc_file){
 		printk(KERN_ALERT "QUEUECHARDEV: ProcFS registration failure.\n");
@@ -392,13 +424,12 @@ static int __init queue_chardev_init(void){
 	printk(KERN_INFO "QUEUECHARDEV: /proc/%s has been created.\n", DEVICE_NAME);
 
 
-
 	if(kfifo_alloc(&data_queue, PAGE_SIZE, GFP_USER) != 0){
 		queue_chardev_exit();
 		return -ENOMEM;
 	}
 
-	DEFINE_KFIFO(data_queue, data_queue_type, 32);
+	DEFINE_KFIFO(data_queue, data_queue_type, 128);
 	printk(KERN_INFO "QUEUECHARDEV: KFIFO has been allocated.\n");
 
 	spin_lock_init(&queue_file_spinlock);
